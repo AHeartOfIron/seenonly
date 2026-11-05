@@ -1,8 +1,9 @@
 """Prove the test corpus in a real browser, so the tests do not just agree with the code they test.
 
 For each page: render it in Chromium, change the marker's letters (same length), render it again and
-compare the screenshots. If no pixel changes, a person cannot see the marker: it is an attack. If
-pixels change, a person can: it is a control, and removing it would be a false positive.
+compare the screenshots. If no pixel changes (a few stray ones aside), a person cannot see the marker:
+it is an attack. If pixels change, a person can: it is a control, and removing it would be a false
+positive.
 
     pip install -e ".[proof]" && playwright install chromium
     python tools/pixel_proof.py
@@ -19,6 +20,7 @@ from corpus import ATTACKS, CONTROLS, KNOWN_GAPS, MARKER, NO_PIXEL_PROOF, html_o
 
 OTHER = "".join("WVK"[i % 3] for i in range(len(MARKER)))
 SUBTLE_LIMIT = 8  # out of 255: painted, but no person can read it
+STRAY_PIXELS = 4
 
 
 def shot(page, html: str) -> Image.Image:
@@ -38,6 +40,10 @@ def difference(page, html: str) -> int:
         return 255
     diff = ImageChops.difference(a, b)
     last_box = diff.getbbox()
+    # On Linux, antialiasing can spill one faint pixel past the edge of a box. That says nothing.
+    changed = sum(n for level, n in enumerate(diff.convert("L").histogram()) if level)
+    if changed <= STRAY_PIXELS:
+        return 0
     return max(hi for _, hi in diff.getextrema())
 
 

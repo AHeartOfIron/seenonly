@@ -68,7 +68,7 @@ It also works the other way, which matters as much: it must not delete real cont
 
 A test written by the same person as the code can share the same mistake. So [`tools/pixel_proof.py`](tools/pixel_proof.py) checks the test pages in Chromium: it changes the letters of the marked text and compares screenshots.
 
-- **No pixel changes:** a person cannot see that text. seenonly must remove it.
+- **No pixel changes** (up to 4 stray antialiasing pixels): a person cannot see that text. seenonly must remove it.
 - **Pixels change:** a person can see it. seenonly must keep it.
 
 ```console
