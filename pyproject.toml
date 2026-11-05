@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "seenonly"
+version = "0.1.0"
+description = "Give an LLM only the text a person can see on a page. Removes hidden prompt injections. Pure Python, no dependencies."
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "Illia Usachov" }]
+requires-python = ">=3.9"
+keywords = ["llm", "prompt-injection", "security", "html", "ai-agents", "rag", "web-scraping", "sanitizer"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Topic :: Security",
+  "Topic :: Text Processing :: Markup :: HTML",
+  "Environment :: Console",
+]
+
+[project.urls]
+Homepage = "https://github.com/AHeartOfIron/seenonly"
+
+[project.scripts]
+seenonly = "seenonly.cli:main"
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+proof = ["playwright>=1.40", "pillow>=10"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "tests"]
+testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
