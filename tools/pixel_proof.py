@@ -26,12 +26,19 @@ def shot(page, html: str) -> Image.Image:
     return Image.open(io.BytesIO(page.screenshot(full_page=True, animations="disabled"))).convert("RGB")
 
 
+last_box = None
+
+
 def difference(page, html: str) -> int:
     """The largest change of any colour channel of any pixel, 0 to 255."""
+    global last_box
     a, b = shot(page, html), shot(page, html.replace(MARKER, OTHER))
     if a.size != b.size:
+        last_box = (a.size, b.size)
         return 255
-    return max(hi for _, hi in ImageChops.difference(a, b).getextrema())
+    diff = ImageChops.difference(a, b)
+    last_box = diff.getbbox()
+    return max(hi for _, hi in diff.getextrema())
 
 
 def main() -> int:
@@ -46,17 +53,17 @@ def main() -> int:
             d = difference(page, html_of(item))
             limit = SUBTLE_LIMIT if is_subtle(item) else 0
             if d > limit:
-                wrong.append(f"attack {name}: a person can see it (pixel difference {d})")
+                wrong.append(f"attack {name}: a person can see it (pixel difference {d} at {last_box})")
         for name, item in sorted(CONTROLS.items()):
             if name in NO_PIXEL_PROOF:
                 continue
             d = difference(page, html_of(item))
             if d <= SUBTLE_LIMIT:
-                wrong.append(f"control {name}: a person cannot see it (pixel difference {d})")
+                wrong.append(f"control {name}: a person cannot see it (pixel difference {d} at {last_box})")
         for name, item in sorted(KNOWN_GAPS.items()):
             d = difference(page, html_of(item))
             if d > SUBTLE_LIMIT:
-                wrong.append(f"known gap {name}: a person can see it, so it is no gap (pixel difference {d})")
+                wrong.append(f"known gap {name}: a person can see it, so it is no gap (pixel difference {d} at {last_box})")
         version = browser.version
         browser.close()
     print(f"Chromium {version}: {len(ATTACKS)} attacks, {len(CONTROLS) - len(NO_PIXEL_PROOF)} controls, {len(KNOWN_GAPS)} known gaps")
