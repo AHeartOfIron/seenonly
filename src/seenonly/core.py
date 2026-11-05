@@ -8,7 +8,8 @@ from typing import Dict, List, Optional, Tuple
 from urllib.parse import urljoin
 
 from .chars import clean_chars
-from .css import (Color, Sheet, blend, contrast, length_px, media_applies, parse_color, parse_declarations, split_top)
+from .css import (Color, Sheet, blend, data_css, length_px, media_applies, parse_color, parse_declarations,
+                  split_top)
 from .dom import Comment, Document, Element, Text, VOID, parse
 from .phrases import detect, strip_sentences
 
@@ -17,8 +18,9 @@ NOT_RENDERED = {
     "fallback": {"noscript", "noframes", "noembed", "iframe", "object", "embed", "applet", "audio", "video", "canvas",
                  "frame", "frameset", "datalist", "template", "param", "source", "track", "area", "map"},
     "svg": {"desc", "metadata", "defs", "symbol", "clippath", "mask", "pattern", "lineargradient", "radialgradient",
-            "filter", "marker"},
+            "filter", "marker", "annotation", "annotation-xml", "rp"},
 }
+_INERT = {"template", "noscript", "noembed", "noframes", "iframe", "xmp", "textarea"}
 _DROP = NOT_RENDERED["head-only"] | NOT_RENDERED["fallback"] | NOT_RENDERED["svg"]
 BLOCK = {
     "address", "article", "aside", "blockquote", "body", "br", "caption", "center", "dd", "details", "dialog", "dir",
@@ -40,7 +42,7 @@ _OFF = -500.0  # px: past this, text left of the page is out of reach
 _OFF_RIGHT = 5000.0
 _FONT_SIZES = {"xx-small": 9.0, "x-small": 10.0, "small": 13.0, "medium": 16.0, "large": 18.0, "x-large": 24.0,
                "xx-large": 32.0, "xxx-large": 48.0}
-_MIN_CONTRAST = 1.10
+_SAME_COLOUR = 16  # out of 255, in every channel
 _BLACK: Color = (0.0, 0.0, 0.0, 1.0)
 _WHITE: Color = (255.0, 255.0, 255.0, 1.0)
 
@@ -223,18 +225,20 @@ class _Styler:
         best: Dict[str, Tuple[tuple, str]] = {}
 
         def put(name: str, value: str, key: tuple) -> None:
-            for n, v in _expand(name, value) if not name.startswith("--") else [(name, value)]:
+            whole = name.startswith("--") or "var(" in value.lower()
+            for n, v in [(name, value)] if whole else _expand(name, value):
                 if n not in best or key >= best[n][0]:
                     best[n] = (key, v)
 
         for name, value in self.hints(el, in_svg):
-            put(name, value, (0, 0, (0, 0, 0), 0))
+            put(name, value, (0, 0, 0, (0, 0, 0), 0))
         for rule in self.sheet.matching(el, self.quirks):
             for name, value, imp in rule.decls:
-                put(name, value, (1 if imp else 0, 1, rule.sel.spec, rule.order))
+                # Unlayered beats layers, later layers beat earlier ones; !important reverses both.
+                put(name, value, (1 if imp else 0, 1, -rule.layer if imp else rule.layer, rule.sel.spec, rule.order))
         if "style" in el.attrs:
             for i, (name, value, imp) in enumerate(parse_declarations(el.attrs["style"])):
-                put(name, value, (1 if imp else 0, 2, (0, 0, 0), i))
+                put(name, value, (1 if imp else 0, 2, 0, (0, 0, 0), i))
         return {k: v[1] for k, v in best.items()}
 
 
@@ -291,7 +295,8 @@ def _hidden_by_style(el: Element, st: Dict[str, str], font: float, in_positioned
             if side in st:
                 # A percentage is of the containing block: the page, unless a positioned ancestor
                 # takes that role. "left:-100%" in a small box is a tooltip beside it.
-                px = length_px(st[side], font, None if in_positioned or side not in ("left", "right") else 1280.0)
+                page_size = 1280.0 if side in ("left", "right") else 800.0
+                px = length_px(st[side], font, None if in_positioned else page_size)
                 if px is None:
                     continue
                 # Past the left or top edge is out of reach for good; past the right edge a page can
@@ -300,22 +305,27 @@ def _hidden_by_style(el: Element, st: Dict[str, str], font: float, in_positioned
                     return f"{side}:{st[side]}"
                 if side == "left" and px >= _OFF_RIGHT:
                     return f"{side}:{st[side]}"
+                # "right:100%" and "bottom:100vh" push it out past the opposite edge. Inside a positioned
+                # box, where that box sits decides; only the page's width is small enough to be sure of.
+                if pos != "relative" and (side == "right" and px >= page_size or side == "bottom" and px >= page_size and not in_positioned):
+                    return f"{side}:{st[side]}"
         clip = st.get("clip", "").lower().replace(",", " ")
         m = re.fullmatch(r"rect\(\s*(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s*\)", clip)
         if m and pos != "relative":
             top, right, bottom, left = (length_px(x, font) for x in m.groups())
             if None not in (top, right, bottom, left) and (bottom - top <= 1 or right - left <= 1):  # type: ignore[operator]
                 return "clip:rect"
-    for side in ("margin-left", "margin-top"):
-        if side in st:  # a percentage here is a layout trick (Sphinx sidebars): it stays unknown
+    for side, limit in (("margin-left", _OFF * 2), ("margin-top", 800 * -1.0)):
+        # A percentage here is a layout trick (Sphinx sidebars), and left:50% with a wide negative
+        # margin centres a banner: neither hides anything.
+        if side in st and not (side == "margin-left" and "left" in st):
             px = length_px(st[side], font)
-            if px is not None and px <= _OFF * 2:
+            if px is not None and px <= limit:
                 return f"{side}:{st[side]}"
 
     cp = st.get("clip-path", "").lower()
     if cp:
-        m = re.match(r"inset\(\s*([-\d.]+)(%|px)?", cp)
-        if m and m.group(2) == "%" and float(m.group(1)) >= 50:
+        if _inset_hides(cp):
             return f"clip-path:{cp}"
         if re.match(r"circle\(\s*0(?:px|%)?\b", cp) or re.match(r"ellipse\(\s*0(?:px|%)?\b", cp):
             return f"clip-path:{cp}"
@@ -344,8 +354,11 @@ def _hidden_by_style(el: Element, st: Dict[str, str], font: float, in_positioned
                 return f"text-indent:{indent} with overflow:hidden"
         boxy = el.tag not in INLINE or pos in ("absolute", "fixed") or display not in ("", "inline")
         if boxy:
+            grows = _grows(st)
             for name, axis in (("width", ox), ("height", oy), ("max-width", ox), ("max-height", oy)):
                 if name in st and axis in ("hidden", "clip"):
+                    if grows or _padded(st, name):
+                        continue
                     px = length_px(st[name], font, 1280.0)
                     if px is not None and px <= 1:
                         return f"{name}:{st[name]} with overflow:hidden"
@@ -356,6 +369,46 @@ def _hidden_by_style(el: Element, st: Dict[str, str], font: float, in_positioned
                 if px is not None and px <= 0:
                     return f"svg {name}:0"
     return None
+
+
+def _grows(st: Dict[str, str]) -> bool:
+    if st.get("flex-grow", "0").strip() not in ("0", ""):
+        return True
+    first = st.get("flex", "0").strip().split()[0] if st.get("flex", "").strip() else "0"
+    return first not in ("0", "none", "initial")
+
+
+def _padded(st: Dict[str, str], name: str) -> bool:
+    """height:0 with padding-bottom:56% is the usual box for a video: it has room."""
+    sides = ("padding-top", "padding-bottom") if "height" in name else ("padding-left", "padding-right")
+    values = [st.get("padding", "")] + [st.get(s, "") for s in sides]
+    return any(v.strip() and (length_px(v.split()[0], percent_of=1280.0) or 0) > 1 for v in values)
+
+
+def _inset_hides(cp: str) -> bool:
+    """inset(top right bottom left): nothing is left when two opposite sides meet."""
+    m = re.match(r"inset\(([^)]*)\)", cp)
+    if not m:
+        return False
+    sides = m.group(1).split(" round ")[0].split()
+    if not 1 <= len(sides) <= 4:
+        return False
+    top = sides[0]
+    right = sides[1] if len(sides) > 1 else top
+    bottom = sides[2] if len(sides) > 2 else top
+    left = sides[3] if len(sides) > 3 else right
+    for a, b in ((top, bottom), (left, right)):
+        pa, pb = length_px(a, percent_of=1.0), length_px(b, percent_of=1.0)
+        if pa is None or pb is None:
+            continue
+        if a.endswith("%") or b.endswith("%"):
+            if a.endswith("%") and b.endswith("%") and pa + pb >= 1:
+                return True
+            if a.endswith("%") and pa >= 1 or b.endswith("%") and pb >= 1:
+                return True
+        elif pa + pb >= 1000:  # no ordinary box survives that
+            return True
+    return False
 
 
 def _hidden_by_transform(st: Dict[str, str], font: float) -> Optional[str]:
@@ -374,13 +427,23 @@ def _hidden_by_transform(st: Dict[str, str], font: float) -> Optional[str]:
                 return "transform:matrix(0)"
         elif fn in ("translate", "translatex", "translatey", "translate3d") and args:
             for a in args[:2]:
-                px = length_px(a, font)  # a percentage stays unknown: slide-in drawers use -100%
+                px = length_px(a, font)
                 if px is not None and px <= _OFF * 2:
                     return f"transform:{fn}({a})"
-        elif fn in ("rotatex", "rotatey") and args:
-            m = re.fullmatch(r"([-\d.]+)deg", args[0])
-            if m and abs(float(m.group(1))) % 180 == 90:
-                return f"transform:{fn}(90deg)"
+                # A percentage is of the element itself: -100% hides a drawer fixed to the page's edge,
+                # not a tooltip inside a box.
+                if a.endswith("%") and st.get("position", "").lower() == "fixed" and (length_px(a, percent_of=1.0) or 0) <= -1:
+                    return f"transform:{fn}({a})"
+        elif fn in ("rotatex", "rotatey", "rotate3d") and args:
+            m = re.fullmatch(r"([-\d.]+)deg", args[-1])
+            if fn == "rotate3d" and (len(args) != 4 or abs(float(args[2] or 0)) > 1e-6 or not m):
+                continue  # around the z axis it only turns in place
+            if m:
+                turned = abs(float(m.group(1))) % 360
+                if turned % 180 == 90:
+                    return f"transform:{fn}(90deg)"
+                if turned == 180 and st.get("backface-visibility", "").lower() == "hidden":
+                    return "backface-visibility:hidden"
     sc = st.get("scale", "").strip().lower()
     if sc and re.fullmatch(r"0+(?:\.0+)?%?(?:\s.*)?", sc):
         return "scale:0"
@@ -441,6 +504,10 @@ def _apply(ctx: _Ctx, st: Dict[str, str]) -> None:
         ctx.bg_sure = False
 
 
+def _same_colour(a: Color, b: Color) -> bool:
+    return max(abs(a[i] - b[i]) for i in range(3)) <= _SAME_COLOUR
+
+
 def _hex(c: Optional[Color]) -> str:
     if c is None:
         return "?"
@@ -475,11 +542,11 @@ def _text_verdict(ctx: _Ctx, in_svg: bool) -> Tuple[Optional[str], Optional[str]
     if not known:
         return None, None
     if ctx.bg is None:  # the background is unknown: only worth a note, against a page's usual white
-        if contrast(blend(color, _WHITE), _WHITE) < _MIN_CONTRAST:
+        if _same_colour(blend(color, _WHITE), _WHITE):
             return None, f"{_hex(color)} text, background unknown"
         return None, None
     painted = blend(color, ctx.bg)
-    if contrast(painted, ctx.bg) < _MIN_CONTRAST:
+    if _same_colour(painted, ctx.bg):
         reason = f"{_hex(painted)} text on {_hex(ctx.bg)}"
         return (reason, None) if ctx.bg_sure else (None, reason)
     return None, None
@@ -524,13 +591,17 @@ def clean(page: str, *, phrases: str = "remove", css: str = "") -> Result:
 
     sheet = Sheet()
     external = False
-    for el in doc.root.walk():
+    for el in _active(doc.root):
         if el.tag == "style" and media_applies(el.attrs.get("media", "")):
             sheet.add_css("".join(c.data for c in el.children if isinstance(c, Text)))
         elif el.tag == "link":
             rel = el.attrs.get("rel", "").lower().split()
             if "stylesheet" in rel and "alternate" not in rel and media_applies(el.attrs.get("media", "")):
-                external = True
+                inner = data_css(el.attrs.get("href", ""))
+                if inner is None:
+                    external = True
+                else:
+                    sheet.add_css(inner)
     if sheet.has_import:
         external = True
     if css:
@@ -703,6 +774,17 @@ def clean(page: str, *, phrases: str = "remove", css: str = "") -> Result:
                   findings=findings, external_css=unseen_css)
 
 
+def _active(root: Element):
+    """Every element except those inside <template>, <noscript> and the like: a browser ignores
+    the stylesheets in there."""
+    stack = [root]
+    while stack:
+        el = stack.pop()
+        yield el
+        if el.tag not in _INERT:
+            stack.extend(reversed(el.kids))
+
+
 def stylesheet_links(page: str, base_url: str = "") -> List[str]:
     """The stylesheets a page links for a screen, in order. Fetch them and pass them as css=.
 
@@ -710,8 +792,8 @@ def stylesheet_links(page: str, base_url: str = "") -> List[str]:
     private addresses and large responses as you would for the page itself.
     """
     out: List[str] = []
-    for el in parse(page).root.walk():
-        if el.tag == "link" and el.attrs.get("href"):
+    for el in _active(parse(page).root):
+        if el.tag == "link" and el.attrs.get("href") and data_css(el.attrs["href"]) is None:
             rel = el.attrs.get("rel", "").lower().split()
             if "stylesheet" in rel and "alternate" not in rel and media_applies(el.attrs.get("media", "")):
                 out.append(urljoin(base_url, el.attrs["href"]))

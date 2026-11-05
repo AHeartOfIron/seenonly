@@ -6,9 +6,12 @@ an attacker can pick to get past a simple check: escapes, var(), calc(), modern 
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import math
 import re
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import unquote
 
 from .dom import Element
 
@@ -18,7 +21,8 @@ RELEVANT = {
     "background-color", "background-image", "background-clip", "-webkit-background-clip", "position", "left", "right",
     "top", "bottom", "text-indent", "width", "height", "max-width", "max-height", "overflow", "overflow-x",
     "overflow-y", "clip", "clip-path", "transform", "translate", "scale", "content-visibility", "filter", "fill",
-    "fill-opacity", "margin-left", "margin-top", "inset", "zoom", "white-space",
+    "fill-opacity", "margin-left", "margin-top", "inset", "zoom", "white-space", "flex", "flex-grow", "padding",
+    "padding-top", "padding-bottom", "padding-left", "padding-right", "backface-visibility", "-webkit-backface-visibility",
 }
 VIEWPORT_W, VIEWPORT_H = 1280, 800
 ROOT_FONT = 16.0
@@ -54,6 +58,8 @@ NAMED = dict(
     tomato=0xff6347, turquoise=0x40e0d0, violet=0xee82ee, wheat=0xf5deb3, whitesmoke=0xf5f5f5, yellowgreen=0x9acd32,
 )
 
+_SYSTEM_COLORS = dict(canvas=0xffffff, canvastext=0x000000, field=0xffffff, fieldtext=0x000000, buttonface=0xefefef,
+                      buttontext=0x000000, linktext=0x0000ee, visitedtext=0x551a8b, activetext=0xff0000, graytext=0x808080)
 Color = Tuple[float, float, float, float]  # r, g, b in 0-255, alpha in 0-1
 
 
@@ -162,6 +168,13 @@ def parse_color(value: str) -> Optional[Color]:
     v = value.strip().lower()
     if v == "transparent":
         return (0.0, 0.0, 0.0, 0.0)
+    if v in _SYSTEM_COLORS:
+        n = _SYSTEM_COLORS[v]
+        return (float(n >> 16 & 255), float(n >> 8 & 255), float(n & 255), 1.0)
+    if v.startswith("color-mix("):
+        return _color_mix(v[10:-1]) if v.endswith(")") else None
+    if v.startswith("color(") and v.endswith(")"):
+        return _color_fn(v[6:-1])
     if v in NAMED:
         n = NAMED[v]
         return (float(n >> 16 & 255), float(n >> 8 & 255), float(n & 255), 1.0)
@@ -230,6 +243,67 @@ def parse_color(value: str) -> Optional[Color]:
     y = ((l + 16) / 116) ** 3 if l > 8 else l / 903.3
     g = _srgb(y)
     return (g, g, g, alpha)
+
+
+def _color_fn(body: str) -> Optional[Color]:
+    """color(srgb 1 1 1 / .5). The wide gamuts are read as sRGB: close enough for "can this be seen"."""
+    alpha = 1.0
+    if "/" in body:
+        body, a_tok = body.rsplit("/", 1)
+        parsed = _number(a_tok, 1.0)
+        if parsed is None:
+            return None
+        alpha = parsed
+    toks = body.split()
+    if len(toks) != 4 or toks[0] not in ("srgb", "srgb-linear", "display-p3", "a98-rgb", "prophoto-rgb", "rec2020"):
+        return None
+    r, g, b = _number(toks[1], 1.0), _number(toks[2], 1.0), _number(toks[3], 1.0)
+    if r is None or g is None or b is None:
+        return None
+    if toks[0] == "srgb-linear":
+        return (_srgb(r), _srgb(g), _srgb(b), alpha)
+    return (max(0.0, min(1.0, r)) * 255, max(0.0, min(1.0, g)) * 255, max(0.0, min(1.0, b)) * 255, alpha)
+
+
+def _color_mix(body: str) -> Optional[Color]:
+    """color-mix(in srgb, white 30%, black). Mixed in sRGB whatever the space: the same reasoning."""
+    parts = [p.strip() for p in split_top(body, ",")]
+    if len(parts) != 3 or not parts[0].startswith("in "):
+        return None
+    colors, weights = [], []
+    for p in parts[1:]:
+        m = re.search(r"\s([\d.]+)%$", p)
+        weights.append(float(m.group(1)) / 100 if m else None)
+        c = parse_color(p[:m.start()] if m else p)
+        if c is None:
+            return None
+        colors.append(c)
+    a, b = weights
+    if a is None and b is None:
+        a, b = 0.5, 0.5
+    elif a is None:
+        a = 1 - b
+    elif b is None:
+        b = 1 - a
+    total = a + b
+    if total <= 0:
+        return None
+    a, b = a / total, b / total
+    x, y = colors
+    return (x[0] * a + y[0] * b, x[1] * a + y[1] * b, x[2] * a + y[2] * b, x[3] * a + y[3] * b)
+
+
+def data_css(url: str) -> Optional[str]:
+    """The stylesheet inside a data: URL, or None."""
+    m = re.match(r"\s*data:text/css[^,]*?(;base64)?,(.*)$", url, re.I | re.S)
+    if not m:
+        return None
+    try:
+        if m.group(1):
+            return base64.b64decode(unquote(m.group(2))).decode("utf-8", "replace")
+    except (binascii.Error, ValueError):
+        return None
+    return unquote(m.group(2))
 
 
 def luminance(c: Color) -> float:
@@ -383,7 +457,7 @@ def _valid(name: str, value: str) -> bool:
     if name in ("opacity", "fill-opacity"):
         return v in GLOBAL or re.fullmatch(r"[-+]?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?%?|calc\(.*\)", v) is not None
     if name in ("color", "-webkit-text-fill-color", "background-color"):
-        return v in GLOBAL or v == "currentcolor" or v in _SYSTEM or v.startswith(("color-mix", "light-dark")) \
+        return v in GLOBAL or v == "currentcolor" or v in _SYSTEM or v.startswith(("color-mix", "light-dark", "color(")) \
             or parse_color(v) is not None
     if name == "font-size":
         return v in GLOBAL or v in _FONT_KEYWORDS or length_px(v, percent_of=16.0) is not None
@@ -510,12 +584,17 @@ def _parse_compound(s: str, i: int) -> Tuple[Compound, int]:
                 raise NeverMatches()
             if name in _AT_REST_TRUE:
                 continue
-            if name in ("not", "is", "where", "matches", "any", "has"):
+            if name == "has":
+                c.pseudos.append((name, _relative_list(arg or "")))
+            elif name in ("not", "is", "where", "matches", "any"):
                 c.pseudos.append((name, selector_list(arg or "")))
-            elif name in ("first-child", "last-child", "only-child", "root", "empty", "link", "any-link"):
+            elif name in ("first-child", "last-child", "only-child", "root", "empty", "link", "any-link",
+                          "first-of-type", "last-of-type", "only-of-type"):
                 c.pseudos.append((name, None))
-            elif name in ("nth-child", "nth-last-child"):
+            elif name in ("nth-child", "nth-last-child", "nth-of-type", "nth-last-of-type"):
                 c.pseudos.append((name, _nth(arg or "")))
+            elif name in ("lang", "dir"):
+                c.pseudos.append((name, (arg or "").strip().strip("\"'").lower()))
             else:
                 raise Unsupported(name)
         else:
@@ -525,32 +604,45 @@ def _parse_compound(s: str, i: int) -> Tuple[Compound, int]:
     return c, i
 
 
-def _nth(arg: str) -> Tuple[int, int]:
-    a = arg.strip().lower().replace(" ", "")
+def _nth(arg: str) -> Tuple[int, int, Optional[List["Complex"]]]:
+    """An+B, with the selector of ":nth-child(2 of .x)" if there is one."""
+    formula, sep, of = arg.partition(" of ")
+    only = selector_list(of) if sep else None
+    a = formula.strip().lower().replace(" ", "")
     if a == "odd":
-        return (2, 1)
+        return (2, 1, only)
     if a == "even":
-        return (2, 0)
+        return (2, 0, only)
     m = re.fullmatch(r"([-+]?\d*)n([-+]\d+)?", a)
     if m:
         k = m.group(1)
-        return (int(k + "1") if k in ("", "+", "-") else int(k), int(m.group(2) or 0))
+        return (int(k + "1") if k in ("", "+", "-") else int(k), int(m.group(2) or 0), only)
     if re.fullmatch(r"[-+]?\d+", a):
-        return (0, int(a))
+        return (0, int(a), only)
     raise Unsupported(arg)
+
+
+def _inherited_attr(el: Optional[Element], name: str) -> str:
+    while el is not None:
+        if name in el.attrs:
+            return el.attrs[name].lower()
+        el = el.parent
+    return ""
 
 
 class Complex:
     """A selector as compounds, rightmost last, with the combinator before each."""
-    __slots__ = ("parts", "spec")
+    __slots__ = ("parts", "spec", "lead")
 
     def __init__(self, parts):
         self.parts: List[Tuple[str, Compound]] = parts
         self.spec = _specificity(parts)
+        self.lead = " "
 
 
 def parse_complex(s: str) -> Complex:
-    s = s.strip()
+    # A namespace prefix: stylesheets on web pages only ever mean "any".
+    s = re.sub(r"(?:^|(?<=[\s>+~,(]))(?:\*|[-\w]*)\|(?=[\w*])", "", s.strip())
     i, parts, comb = 0, [], ""
     while i < len(s):
         while i < len(s) and s[i].isspace():
@@ -569,6 +661,21 @@ def parse_complex(s: str) -> Complex:
     if not parts:
         raise Unsupported(s)
     return Complex(parts)
+
+
+def _relative_list(s: str) -> List[Complex]:
+    """The argument of :has(): each selector remembers the combinator it starts with."""
+    out = []
+    for part in split_top(s, ","):
+        part = part.strip()
+        comb = part[0] if part[:1] in (">", "+", "~") else " "
+        try:
+            sel = parse_complex(part.lstrip(">+~ "))
+        except NeverMatches:
+            continue
+        sel.lead = comb
+        out.append(sel)
+    return out
 
 
 def selector_list(s: str) -> List[Complex]:
@@ -646,7 +753,7 @@ def _match_compound(el: Element, c: Compound, quirks: bool) -> bool:
             if not any(match(el, x, quirks) for x in arg):
                 return False
         elif name == "has":
-            if not any(match(d, x, quirks) for x in arg for d in el.walk() if d is not el):
+            if not any(_has(el, x, quirks) for x in arg):
                 return False
         elif name == "root":
             if el.tag != "html":
@@ -657,25 +764,48 @@ def _match_compound(el: Element, c: Compound, quirks: bool) -> bool:
         elif name == "empty":
             if el.children:
                 return False
+        elif name == "lang":
+            have = _inherited_attr(el, "lang")
+            if have != arg and not have.startswith(f"{arg}-"):
+                return False
+        elif name == "dir":
+            if (_inherited_attr(el, "dir") or "ltr") != arg:
+                return False
         else:
             sibs = el.parent.elements() if el.parent else [el]
-            pos = el.index + 1
-            last = len(sibs) - el.index
-            if name == "first-child" and pos != 1:
+            if name.endswith("of-type"):
+                sibs = [s for s in sibs if s.tag == el.tag]
+            elif name in ("nth-child", "nth-last-child") and arg[2] is not None:
+                sibs = [s for s in sibs if any(match(s, x, quirks) for x in arg[2])]
+                if el not in sibs:
+                    return False
+            pos = sibs.index(el) + 1 if len(sibs) != len(el.parent.kids if el.parent else [el]) else el.index + 1
+            last = len(sibs) - pos + 1
+            if name in ("first-child", "first-of-type") and pos != 1:
                 return False
-            if name == "last-child" and last != 1:
+            if name in ("last-child", "last-of-type") and last != 1:
                 return False
-            if name == "only-child" and len(sibs) != 1:
+            if name in ("only-child", "only-of-type") and len(sibs) != 1:
                 return False
-            if name in ("nth-child", "nth-last-child"):
-                a, b = arg
-                x = pos if name == "nth-child" else last
+            if name in ("nth-child", "nth-last-child", "nth-of-type", "nth-last-of-type"):
+                a, b = arg[0], arg[1]
+                x = last if "last" in name else pos
                 if a == 0:
                     if x != b:
                         return False
                 elif (x - b) % a != 0 or (x - b) / a < 0:
                     return False
     return True
+
+
+def _has(el: Element, sel: Complex, quirks: bool) -> bool:
+    if sel.lead == " ":
+        return any(match(d, sel, quirks) for d in el.walk() if d is not el)
+    if sel.lead == ">":
+        return any(match(k, sel, quirks) for k in el.kids)
+    sibs = el.parent.kids if el.parent else []
+    after = sibs[el.index + 1:]
+    return any(match(k, sel, quirks) for k in (after[:1] if sel.lead == "+" else after))
 
 
 def match(el: Element, sel: Complex, quirks: bool) -> bool:
@@ -841,11 +971,59 @@ def _statements(css: str):
 _PAINTING_PSEUDO = re.compile(r"::?(?:before|after)\s*$", re.I)
 
 
-class Rule:
-    __slots__ = ("sel", "decls", "order")
+UNLAYERED = 1 << 20
 
-    def __init__(self, sel: Complex, decls, order: int):
-        self.sel, self.decls, self.order = sel, decls, order
+
+def supports_applies(cond: str) -> bool:
+    """@supports. A declaration we can judge is judged; anything else is assumed to be supported."""
+    c = cond.strip()
+    while c.startswith("(") and c.endswith(")") and _closes_last(c):
+        inner = c[1:-1].strip()
+        m = re.fullmatch(r"([-a-zA-Z]+)\s*:\s*(.+)", inner, re.S)
+        if m and "(" not in m.group(1):
+            name = m.group(1).lower()
+            return _valid(name, m.group(2).strip()) if name in ("display", "visibility", "color", "opacity", "font-size") else True
+        c = inner
+    low = c.lower()
+    if low.startswith("not ") or low.startswith("not("):
+        return not supports_applies(c[3:])
+    for word, combine in ((" or ", any), (" and ", all)):
+        parts = _split_words(c, word)
+        if len(parts) > 1:
+            return combine(supports_applies(p) for p in parts)
+    return True
+
+
+def _closes_last(c: str) -> bool:
+    depth = 0
+    for i, ch in enumerate(c):
+        depth += ch == "("
+        depth -= ch == ")"
+        if depth == 0:
+            return i == len(c) - 1
+    return False
+
+
+def _split_words(c: str, word: str) -> List[str]:
+    parts, depth, start, i, low = [], 0, 0, 0, c.lower()
+    while i < len(c):
+        depth += c[i] == "("
+        depth -= c[i] == ")"
+        if depth == 0 and low.startswith(word, i):
+            parts.append(c[start:i])
+            i += len(word)
+            start = i
+            continue
+        i += 1
+    parts.append(c[start:])
+    return parts
+
+
+class Rule:
+    __slots__ = ("sel", "decls", "order", "layer")
+
+    def __init__(self, sel: Complex, decls, order: int, layer: int):
+        self.sel, self.decls, self.order, self.layer = sel, decls, order, layer
 
 
 class Sheet:
@@ -860,6 +1038,8 @@ class Sheet:
         self.unsupported = 0
         self.has_import = False
         self.painted_pseudo: Dict[str, List[Complex]] = {}  # by rightmost class, or "*"
+        self.layers: Dict[str, int] = {}  # by name, in the order first mentioned
+        self.layer = UNLAYERED  # of the rules being read
 
     def add_rule(self, selectors: str, body: str) -> None:
         decls = parse_declarations(body)
@@ -875,7 +1055,7 @@ class Sheet:
             except (Unsupported, RecursionError):
                 self.unsupported += 1
                 continue
-            rule = Rule(sel, decls, self.order)
+            rule = Rule(sel, decls, self.order, self.layer)
             right = sel.parts[-1][1]
             if right.id:
                 self.by_id.setdefault(right.id.lower(), []).append(rule)
@@ -885,6 +1065,9 @@ class Sheet:
                 self.by_tag.setdefault(right.tag, []).append(rule)
             else:
                 self.universal.append(rule)
+
+    def _layer_rank(self, name: str) -> int:
+        return self.layers.setdefault(name, len(self.layers))
 
     def _note_pseudo(self, selector: str, decls) -> None:
         """A ::before or ::after that paints a background sits behind the element's text."""
@@ -920,13 +1103,29 @@ class Sheet:
                 continue
             low = prelude.lower()
             if body is None:
-                self.has_import = self.has_import or low.startswith("@import")
+                if low.startswith("@layer"):
+                    for name in prelude[6:].split(","):
+                        self._layer_rank(name.strip())
+                elif low.startswith("@import"):
+                    m = re.match(r"""@import\s+(?:url\(\s*)?["']?(data:[^"')]*)""", prelude, re.I)
+                    inner = data_css(m.group(1)) if m else None
+                    if inner is None:
+                        self.has_import = True
+                    else:
+                        self._block(strip_comments(inner), depth + 1, parent)
             elif low.startswith("@media"):
                 if media_applies(prelude[6:]):
                     self._block(body, depth + 1, parent)
-            elif low.startswith(("@supports", "@layer", "@scope", "@container")):
-                if not low.startswith("@container"):
+            elif low.startswith("@supports"):
+                if supports_applies(prelude[9:]):
                     self._block(body, depth + 1, parent)
+            elif low.startswith("@layer"):
+                outer = self.layer
+                self.layer = self._layer_rank(prelude[6:].strip() or f"#anonymous{len(self.layers)}")
+                self._block(body, depth + 1, parent)
+                self.layer = outer
+            elif low.startswith("@scope"):
+                self._block(body, depth + 1, parent)
             elif not low.startswith("@"):
                 self._block(body, depth + 1, _nest(parent, prelude))
 

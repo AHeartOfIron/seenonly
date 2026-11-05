@@ -10,18 +10,7 @@ same way: changing the marker's letters does change pixels. Removing these is a 
 
 "subtle" attacks are painted, but too faintly to read; the proof allows a tiny pixel difference there.
 """
-MARKER = "QZXMARKERQZX"
-_M = MARKER
-
-
-def page(body: str, head: str = "", doctype: bool = True) -> str:
-    dt = "<!doctype html>" if doctype else ""
-    return (f'{dt}<html><head><meta charset="utf-8"><title>Test</title>{head}</head>'
-            f'<body><h1>Visible heading</h1><p>Visible article text.</p>{body}<p>Closing line.</p></body></html>')
-
-
-def style(css: str) -> str:
-    return f"<style>{css}</style>"
+from page_builders import MARKER, _M, page, style
 
 
 ATTACKS = {
@@ -157,6 +146,29 @@ ATTACKS = {
     "text_indent_kellum": page(f'<div style="width:200px;text-indent:100%;white-space:nowrap;overflow:hidden">{_M}</div>'),
     "left_percent_viewport": page(f'<div style="position:absolute;left:-100%">{_M}</div>'),
     "zoom_tiny": {"unreadable": True, "html": page(f'<div style="zoom:.001">{_M}</div>')},
+    # The first blind round: written after the library, judged by Chromium, and these got through.
+    "clip_path_inset_right": page(f'<div style="clip-path:inset(0 100% 0 0)">{_M}</div>'),
+    "clip_path_inset_bottom": page(f'<div style="clip-path:inset(0 0 100% 0)">{_M}</div>'),
+    "clip_path_inset_px": page(f'<div style="clip-path:inset(500px)">{_M}</div>'),
+    "color_srgb_fn": page(f'<p style="color:color(srgb 1 1 1)">{_M}</p>'),
+    "color_mix": page(f'<p style="color:color-mix(in srgb,white,white)">{_M}</p>'),
+    "color_canvas": page(f'<p style="color:Canvas">{_M}</p>'),
+    "sheet_first_of_type": page(f"<div><b>{_M}</b></div>", style("b:first-of-type{display:none}")),
+    "sheet_last_of_type": page(f"<div><b>{_M}</b></div>", style("b:last-of-type{display:none}")),
+    "sheet_nth_of_type": page(f"<div><b>{_M}</b></div>", style("b:nth-of-type(1){display:none}")),
+    "sheet_only_of_type": page(f"<div><b>{_M}</b></div>", style("b:only-of-type{display:none}")),
+    "sheet_lang": page(f'<div lang="en">{_M}</div>', style(":lang(en){display:none}")),
+    "sheet_dir": page(f"<b>{_M}</b>", style("b:dir(ltr){display:none}")),
+    "sheet_nth_child_of": page(f"<div><b>{_M}</b></div>", style("b:nth-child(1 of b){display:none}")),
+    "link_data_css": page(f'<div class="x">{_M}</div>', '<link rel="stylesheet" href="data:text/css,.x{display:none}">'),
+    "import_data_css": page(f'<div class="x">{_M}</div>', '<style>@import url("data:text/css,.x{display:none}");</style>'),
+    "offscreen_bottom_viewport": page(f'<div style="position:absolute;bottom:100vh">{_M}</div>'),
+    "margin_top_viewport": page(f'<div style="margin-top:-100vh">{_M}</div>'),
+    "offscreen_top_percent": page(f'<div style="position:fixed;top:-100%">{_M}</div>'),
+    "offscreen_right_percent": page(f'<div style="position:fixed;right:100%">{_M}</div>'),
+    "fixed_drawer_translate": page(f'<div style="position:fixed;left:0;transform:translateX(-100%)">{_M}</div>'),
+    "math_annotation": page(f"<math><semantics><mi>x</mi><annotation>{_M}</annotation></semantics></math>"),
+    "ruby_rp": page(f"<ruby>a<rp>{_M}</rp><rt>b</rt></ruby>"),
     # Faint rather than absent.
     "near_white": {"subtle": True, "html": page(f'<p style="color:#fefefe">{_M}</p>')},
     "near_white_alpha": {"subtle": True, "html": page(f'<p style="color:rgba(0,0,0,.01)">{_M}</p>')},
@@ -179,6 +191,11 @@ CONTROLS = {
     "keyframes_not_a_rule": page(f'<div class="p">{_M}</div>', style("@keyframes p{from{display:none}to{opacity:0}}")),
     "font_face_not_a_rule": page(f'<div class="p">{_M}</div>', style("@font-face{font-family:x;display:none}")),
     "background_inherit": page(f'<div style="background-color:inherit;color:#222">{_M}</div>'),
+    "style_in_template": page(f'<template><style>.x{{display:none}}</style></template><div class="x">{_M}</div>'),
+    "style_in_noscript": page(f'<noscript><style>.x{{display:none}}</style></noscript><div class="x">{_M}</div>'),
+    "flex_item_grows": page(f'<div style="display:flex"><div style="width:0;flex-grow:1;overflow:hidden">{_M}</div></div>'),
+    "video_box_height_zero": page(f'<div style="position:relative;height:0;padding-bottom:56%;overflow:hidden"><div style="position:absolute;top:0">{_M}</div></div>'),
+    "banner_centred_by_margin": page(f'<div style="position:relative;height:40px;overflow:hidden"><div style="position:absolute;left:50%;margin-left:-1000px;width:2000px;text-align:center">{_M}</div></div>'),
     "object_without_data": page(f"<object>{_M}</object>"),
     "tooltip_percent_near": page(f'<div style="position:relative;margin-left:300px;width:100px"><span style="position:absolute;left:-100%">{_M}</span></div>'),
     "display_overridden": page(f'<div class="x" style="display:block">{_M}</div>', style(".x{display:none}")),
@@ -222,6 +239,11 @@ CONTROLS = {
     "class_bootstrap_shown": page(f'<div class="d-none d-md-block">{_M}</div>'),
 }
 
+import corpus_blind  # noqa: E402
+
+ATTACKS.update(corpus_blind.ATTACKS)
+CONTROLS.update(corpus_blind.CONTROLS)
+
 # Invisible in Chromium, and seenonly misses them: telling these apart takes real layout or painting.
 # They are here so the limits are measured, not guessed. A fix moves one up to ATTACKS.
 KNOWN_GAPS = {
@@ -230,6 +252,7 @@ KNOWN_GAPS = {
     "css_mask": page(f'<div style="mask-image:linear-gradient(transparent,transparent)">{_M}</div>'),
     "svg_fill_opacity": page(f'<svg width="300" height="40"><text y="20" fill-opacity="0">{_M}</text></svg>'),
     "custom_clip_path": page(f"""<div style="clip-path:path('M0 0')">{_M}</div>"""),
+    "container_query": page(f'<div class="c"><div class="x">{_M}</div></div>', style(".c{container-type:inline-size}@container (min-width:1px){.x{display:none}}")),
     "animation_ends_hidden": page(f'<div class="x">{_M}</div>', style("@keyframes k{to{opacity:0}}.x{animation:k 0s forwards}")),
 }
 

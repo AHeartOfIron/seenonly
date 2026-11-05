@@ -73,11 +73,22 @@ A test written by the same person as the code can share the same mistake. So [`t
 
 ```console
 $ python tools/pixel_proof.py
-Chromium 156.0.8078.4: 131 attacks, 54 controls, 6 known gaps
+Chromium 156.0.8078.4: 289 attacks, 118 controls, 7 known gaps
 All proven.
 ```
 
-This runs in CI on every push. Five attack pages are exceptions: they are painted too faintly or too small to read, so some pixels change while there is nothing to read. Three must stay under a tiny pixel difference; two are skipped. When it first ran, it caught mistakes in my own tests.
+This runs in CI on every push. A few attack pages are exceptions: they are painted too faintly or too small to read, so some pixels change while there is nothing to read. Three must stay under a tiny pixel difference; two are skipped. When it first ran, it caught mistakes in my own tests.
+
+### Blind rounds
+
+A corpus written alongside the code flatters it. So I wrote new pages after the library was finished, and let Chromium judge them before seenonly saw them:
+
+| Round | Agreed with Chromium |
+|---|---:|
+| First | 52 of 80 |
+| Second, after fixing what the first found | 114 of 124 |
+
+Those are raw counts. The first round really did get past it, through things like `:first-of-type`, `clip-path: inset(0 100% 0 0)` and `color(srgb 1 1 1)`. A few disagreements were faults in my test pages. Every page that counts as evidence is now in the corpus. Expect the next person's attacks to find more.
 
 ## On real pages
 
@@ -85,7 +96,7 @@ This runs in CI on every push. Five attack pages are exceptions: they are painte
 
 | | Real text removed by mistake | Hidden text not caught |
 |---|---:|---:|
-| With the page's stylesheets | **0.3%** | **0.8%** |
+| With the page's stylesheets | **0.1%** | **0.5%** |
 | With the HTML alone | 0.0% | 15.6% |
 
 The second row is the most important thing to know about this library. **Most hidden text on real sites is hidden by external stylesheets.** seenonly cannot see a file it was not given. Give it the CSS:
@@ -100,7 +111,7 @@ r = clean(html, css=css)
 
 `r.external_css` is `True` when a page links stylesheets you did not pass. In that mode seenonly also recognises the usual hidden utility classes (`sr-only`, `d-none`, Tailwind's `hidden`) but does not judge colours, since it does not know the page's backgrounds.
 
-The worst single pages, with CSS: 6.8% removed by mistake on MDN, 16.3% not caught on debian.org. The instruction filter fired on 2 of the 24 pages, a Wikipedia article and a paper, both about prompt injection. Those were false alarms: they quote the attack. Median time was about 0.6 s, and the slowest page took 3 s, in pure Python.
+The worst single pages, with CSS: 6.8% removed by mistake on MDN, 16.3% not caught on debian.org. The instruction filter fired on 2 of the 24 pages, a Wikipedia article and a paper, both about prompt injection. Those were false alarms: they quote the attack. Median time was about 0.7 s, and the slowest page took about 3 s, in pure Python.
 
 ## What it does not catch
 
@@ -108,7 +119,7 @@ Know these before you rely on it. Each one below has a test page proven invisibl
 
 - Text covered by another opaque element
 - Text clipped by a parent, when moved outside the parent's box
-- `mask-image`, `clip-path: path()`, SVG `fill-opacity`, and animations that end hidden
+- `mask-image`, `clip-path: path()`, SVG `fill-opacity`, container queries, and animations that end hidden
 
 Telling these apart needs real layout and painting. Also:
 
