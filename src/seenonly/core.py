@@ -172,15 +172,16 @@ def _expand(name: str, value: str) -> List[Tuple[str, str]]:
 
 
 class _Styler:
-    def __init__(self, sheet: Sheet, quirks: bool):
+    def __init__(self, sheet: Sheet, quirks: bool, streamed: frozenset = frozenset()):
         self.sheet, self.quirks = sheet, quirks
+        self.streamed = streamed
         self.cache: Dict[int, Dict[str, str]] = {}
 
     def hints(self, el: Element, in_svg: bool) -> List[Tuple[str, str]]:
         """What the browser's own stylesheet and old HTML attributes say. Any author CSS beats these."""
         a = el.attrs
         out: List[Tuple[str, str]] = []
-        if "hidden" in a or (el.tag == "dialog" and "open" not in a) or (el.tag == "input" and a.get("type", "").lower() == "hidden"):
+        if ("hidden" in a and a.get("id") not in self.streamed) or (el.tag == "dialog" and "open" not in a) or (el.tag == "input" and a.get("type", "").lower() == "hidden"):
             out.append(("display", "none"))
         if "popover" in a:
             out.append(("display", "none"))
@@ -608,7 +609,7 @@ def clean(page: str, *, phrases: str = "remove", css: str = "") -> Result:
         sheet.add_css(css)
     unseen_css = external and not css
 
-    styler = _Styler(sheet, quirks=not doc.has_doctype)
+    styler = _Styler(sheet, quirks=not doc.has_doctype, streamed=_streamed_ids(doc.root))
     root = _Ctx()
     if unseen_css:
         # The colours may come from a file we did not see: nothing can be concluded from them.
@@ -772,6 +773,20 @@ def clean(page: str, *, phrases: str = "remove", css: str = "") -> Result:
         title = ""
     return Result(text="\n".join(lines), html=_serialize(doc.root), title=title, description=description,
                   findings=findings, external_css=unseen_css)
+
+
+_REACT_MOVE = re.compile(r"""\$R[A-Z]?\(\s*["'](?:B|P):\w+["']\s*,\s*["'](S:\w+)["']""")
+_REACT_DEFINED = re.compile(r"\$R[A-Z]?\s*=\s*function")
+
+
+def _streamed_ids(root: Element) -> frozenset:
+    """Blocks a page streamed by React (Next.js among others) sends as <div hidden id="S:1">, with a
+    script that moves each one into place at once. A person sees them, so they are not hidden text.
+    Only for a page that defines the mover, and only for the blocks it names."""
+    scripts = "".join(c.data for el in root.walk() if el.tag == "script" for c in el.children if isinstance(c, Text))
+    if not _REACT_DEFINED.search(scripts):
+        return frozenset()
+    return frozenset(_REACT_MOVE.findall(scripts))
 
 
 def _active(root: Element):

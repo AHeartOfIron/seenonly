@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "seenonly"
-version = "0.1.0"
+version = "0.1.1"
 description = "Give an LLM only the text a person can see on a page. Removes hidden prompt injections. Pure Python, no dependencies."
 readme = "README.md"
 license = "MIT"

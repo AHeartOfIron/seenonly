@@ -24,6 +24,7 @@ STRAY_PIXELS = 4
 
 
 def shot(page, html: str) -> Image.Image:
+    page.goto("about:blank")  # set_content keeps scripts' globals from the page before
     page.set_content(html, wait_until="load")
     return Image.open(io.BytesIO(page.screenshot(full_page=True, animations="disabled"))).convert("RGB")
 

@@ -13,6 +13,8 @@ same way: changing the marker's letters does change pixels. Removing these is a 
 from page_builders import MARKER, _M, page, style
 
 
+_MOVER = """<script>$RC=function(b,s){s=document.getElementById(s);b=document.getElementById(b);if(s&&b){s.hidden=false;b.parentNode.replaceChild(s,b)}};</script>"""
+
 ATTACKS = {
     # Inline CSS, the common forms.
     "display_none": page(f'<div style="display:none">{_M}</div>'),
@@ -169,6 +171,9 @@ ATTACKS = {
     "fixed_drawer_translate": page(f'<div style="position:fixed;left:0;transform:translateX(-100%)">{_M}</div>'),
     "math_annotation": page(f"<math><semantics><mi>x</mi><annotation>{_M}</annotation></semantics></math>"),
     "ruby_rp": page(f"<ruby>a<rp>{_M}</rp><rt>b</rt></ruby>"),
+    "react_block_never_moved": page(f'<div hidden id="S:1">{_M}</div>'),
+    "react_block_other_id": page(f'<template id="B:2"></template><div hidden id="S:1">{_M}</div>{_MOVER}<script>$RC("B:2","S:2")</script>'),
+    "react_call_without_mover": page(f'<template id="B:1"></template><div hidden id="S:1">{_M}</div><script>$RC("B:1","S:1")</script>'),
     # Faint rather than absent.
     "near_white": {"subtle": True, "html": page(f'<p style="color:#fefefe">{_M}</p>')},
     "near_white_alpha": {"subtle": True, "html": page(f'<p style="color:rgba(0,0,0,.01)">{_M}</p>')},
@@ -196,6 +201,7 @@ CONTROLS = {
     "flex_item_grows": page(f'<div style="display:flex"><div style="width:0;flex-grow:1;overflow:hidden">{_M}</div></div>'),
     "video_box_height_zero": page(f'<div style="position:relative;height:0;padding-bottom:56%;overflow:hidden"><div style="position:absolute;top:0">{_M}</div></div>'),
     "banner_centred_by_margin": page(f'<div style="position:relative;height:40px;overflow:hidden"><div style="position:absolute;left:50%;margin-left:-1000px;width:2000px;text-align:center">{_M}</div></div>'),
+    "react_streamed_block": page(f'<template id="B:1"></template><div hidden id="S:1">{_M}</div>{_MOVER}<script>$RC("B:1","S:1")</script>'),
     "object_without_data": page(f"<object>{_M}</object>"),
     "tooltip_percent_near": page(f'<div style="position:relative;margin-left:300px;width:100px"><span style="position:absolute;left:-100%">{_M}</span></div>'),
     "display_overridden": page(f'<div class="x" style="display:block">{_M}</div>', style(".x{display:none}")),
@@ -253,6 +259,7 @@ KNOWN_GAPS = {
     "svg_fill_opacity": page(f'<svg width="300" height="40"><text y="20" fill-opacity="0">{_M}</text></svg>'),
     "custom_clip_path": page(f"""<div style="clip-path:path('M0 0')">{_M}</div>"""),
     "container_query": page(f'<div class="c"><div class="x">{_M}</div></div>', style(".c{container-type:inline-size}@container (min-width:1px){.x{display:none}}")),
+    "react_mover_that_does_nothing": page(f'<template id="B:1"></template><div hidden id="S:1">{_M}</div><script>$RC=function(){{}};$RC("B:1","S:1")</script>'),
     "animation_ends_hidden": page(f'<div class="x">{_M}</div>', style("@keyframes k{to{opacity:0}}.x{animation:k 0s forwards}")),
 }
 
