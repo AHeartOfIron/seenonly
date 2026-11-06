@@ -172,16 +172,15 @@ def _expand(name: str, value: str) -> List[Tuple[str, str]]:
 
 
 class _Styler:
-    def __init__(self, sheet: Sheet, quirks: bool, streamed: frozenset = frozenset()):
+    def __init__(self, sheet: Sheet, quirks: bool):
         self.sheet, self.quirks = sheet, quirks
-        self.streamed = streamed
         self.cache: Dict[int, Dict[str, str]] = {}
 
     def hints(self, el: Element, in_svg: bool) -> List[Tuple[str, str]]:
         """What the browser's own stylesheet and old HTML attributes say. Any author CSS beats these."""
         a = el.attrs
         out: List[Tuple[str, str]] = []
-        if ("hidden" in a and a.get("id") not in self.streamed) or (el.tag == "dialog" and "open" not in a) or (el.tag == "input" and a.get("type", "").lower() == "hidden"):
+        if "hidden" in a or (el.tag == "dialog" and "open" not in a) or (el.tag == "input" and a.get("type", "").lower() == "hidden"):
             out.append(("display", "none"))
         if "popover" in a:
             out.append(("display", "none"))
@@ -609,7 +608,8 @@ def clean(page: str, *, phrases: str = "remove", css: str = "") -> Result:
         sheet.add_css(css)
     unseen_css = external and not css
 
-    styler = _Styler(sheet, quirks=not doc.has_doctype, streamed=_streamed_ids(doc.root))
+    _reveal_streamed(doc.root, findings)
+    styler = _Styler(sheet, quirks=not doc.has_doctype)
     root = _Ctx()
     if unseen_css:
         # The colours may come from a file we did not see: nothing can be concluded from them.
@@ -775,18 +775,56 @@ def clean(page: str, *, phrases: str = "remove", css: str = "") -> Result:
                   findings=findings, external_css=unseen_css)
 
 
-_REACT_MOVE = re.compile(r"""\$R[A-Z]?\(\s*["'](?:B|P):\w+["']\s*,\s*["'](S:\w+)["']""")
-_REACT_DEFINED = re.compile(r"\$R[A-Z]?\s*=\s*function")
+_REACT_CALL = re.compile(r"""(?:^|[;\s})])\$R[A-Z]?\(\s*["']([BPS]:\w+)["']\s*,\s*["']([BPS]:\w+)["']""")
+_REACT_MOVER = re.compile(r"\$R[A-Z]?\s*=\s*function\s*\([^)]*\)\s*\{[^;]{0,200}getElementById")
+_JS_TYPES = {"", "text/javascript", "application/javascript", "module"}
 
 
-def _streamed_ids(root: Element) -> frozenset:
-    """Blocks a page streamed by React (Next.js among others) sends as <div hidden id="S:1">, with a
-    script that moves each one into place at once. A person sees them, so they are not hidden text.
-    Only for a page that defines the mover, and only for the blocks it names."""
-    scripts = "".join(c.data for el in root.walk() if el.tag == "script" for c in el.children if isinstance(c, Text))
-    if not _REACT_DEFINED.search(scripts):
-        return frozenset()
-    return frozenset(_REACT_MOVE.findall(scripts))
+def _classic_script(el: Element) -> bool:
+    return el.tag == "script" and "src" not in el.attrs and el.attrs.get("type", "").strip().lower() in _JS_TYPES
+
+
+def _reveal_streamed(root: Element, findings: List[Finding]) -> None:
+    """React (Next.js among others) streams ordinary articles as <div hidden id="S:1"> with a script that
+    moves each one into place at once, so a person sees them. Those lose their hidden attribute here, which
+    is the state a browser ends in. It takes all of: an inline script that defines the mover and calls it for
+    this block, and the placeholder the call names, with React's "$?" marker before a Suspense one.
+
+    A static check cannot prove what a script does, so a page can pretend. What such a block says stays hidden
+    if it reads like an instruction to an AI, and every revealed block is noted in the findings."""
+    els = list(_active(root))
+    scripts = [("".join(c.data for c in el.children if isinstance(c, Text))) for el in els if _classic_script(el)]
+    if not any(_REACT_MOVER.search(s) for s in scripts):
+        return
+    by_id = {}
+    for el in els:
+        if "id" in el.attrs:
+            by_id.setdefault(el.attrs["id"], []).append(el)
+    for script in scripts:
+        for first, second in _REACT_CALL.findall(script):
+            block, holder = (first, second) if first.startswith("S:") else (second, first)
+            if not block.startswith("S:") or holder[:2] not in ("B:", "P:"):
+                continue
+            blocks, holders = by_id.get(block, []), by_id.get(holder, [])
+            if len(blocks) != 1 or len(holders) != 1:
+                continue
+            el, place = blocks[0], holders[0]
+            if el.tag != "div" or "hidden" not in el.attrs or place.tag != "template" or el is place:
+                continue
+            if holder.startswith("B:") and not _after_suspense_marker(place):
+                continue
+            said = clean_chars(_all_text(el))[0]
+            if detect(said):
+                continue  # stays hidden, and report_hidden flags it
+            del el.attrs["hidden"]
+            if said.strip():
+                findings.append(Finding("maybe_hidden", "hidden block moved by a script (React streaming)", _snippet(said), el.path()))
+
+
+def _after_suspense_marker(place: Element) -> bool:
+    kids = place.parent.children if place.parent else []
+    i = next((n for n, k in enumerate(kids) if k is place), 0)
+    return i > 0 and isinstance(kids[i - 1], Comment) and kids[i - 1].data.strip() == "$?"
 
 
 def _active(root: Element):

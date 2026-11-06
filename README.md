@@ -73,7 +73,7 @@ A test written by the same person as the code can share the same mistake. So [`t
 
 ```console
 $ python tools/pixel_proof.py
-Chromium 156.0.8078.4: 292 attacks, 119 controls, 8 known gaps
+Chromium 156.0.8078.4: 295 attacks, 119 controls, 8 known gaps
 All proven.
 ```
 
@@ -123,7 +123,7 @@ Know these before you rely on it. Each one below has a test page proven invisibl
 
 Telling these apart needs real layout and painting. Also:
 
-- **JavaScript does not run.** For pages built by scripts, render them first and pass `page.content()`. One exception: blocks streamed by React (`<div hidden id="S:1">` moved by a `$RC` call) count as visible, because that is how Next.js sends ordinary articles. A page that only pretends to stream can use this to keep text it hides.
+- **JavaScript does not run.** For pages built by scripts, render them first and pass `page.content()`. One exception: blocks streamed by React (`<div hidden id="S:1">`, its placeholder, and an inline `$RC` call) count as visible, because that is how Next.js sends ordinary articles. A static check cannot prove what the script does, so a page that imitates all of it can keep hidden text. Such blocks are listed as `maybe_hidden`, and one that reads like an order to an AI stays hidden.
 - **Pages can serve agents different content.** seenonly sees only what you give it.
 - **An attacker can write the instructions in plain sight, in their own words.** The phrase filter catches what gets copied around; it cannot catch every rewording. This library removes one attack route. It does not make model output safe: an agent's tools still need their own limits.
 - **Hidden text is removed whatever it says,** so this is also a text extractor with opinions. Text inside a closed `<details>` stays, because a person can open it. Fallback inside an `<object>` that has a file is removed, even if the file would fail to load.
